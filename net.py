@@ -26,9 +26,82 @@ class my_pos_emb(nn.Module):
         return pos_embs
 
 
-class my_enc(nn.Module):
+class ENCODER(nn.Module):
     def __init__(self, args):
-        super(my_enc, self).__init__()
+        super(ENCODER, self).__init__()
+        self.device = torch.device('cuda') if args.cuda else torch.device('cpu')
+        self.layers = nn.ModuleList([my_enc_layer(args) for i in range(args.num_encoder)])
+
+    def forward(self, inputs, attn_mask):
+        for enc in self.layers:
+            output = enc(srcQ=inputs, srcK=inputs, srcV=inputs, attn_mask = attn_mask)
+            inputs = output
+        return output
+
+class my_enc_layer(nn.Module):
+    def __init__(self, args):
+        super(my_enc_layer, self).__init__()
+        self.layer = MultiheadAttention(args)
+        self.pos_fn = FFNN(args)
+
+    def forward(self, srcQ, srcK, srcV, attn_mask):
+        output = self.layer(srcQ, srcK, srcV, attn_mask)
+        output = self.pos_fn(output)
+        return output
+
+
+class DECODER(nn.Module):
+    def __init__(self, args):
+        super(DECODER, self).__init__()
+        self.device = torch.device('cuda') if args.cuda else torch.device('cpu')
+        self.layers = nn.ModuleList([my_dec_layer(args) for i in range(args.num_decoder)])
+
+    def forward(self, dec_input, look_ahead_mask, enc_input, attn_mask):
+        for dec in self.layers:
+            output = dec(dec_input, look_ahead_mask, enc_input, attn_mask)
+            srcQ, srcK, srcV = output, output, output
+        return output
+
+class my_dec_layer(nn.Module):
+    def __init__(self, args):
+        super(my_dec_layer, self).__init__()
+        self.layer1 = MultiheadAttention(args)
+        self.layer2 = MultiheadAttention(args)
+        self.pos_fn = FFNN(args)
+
+    def forward(self, dec_input, look_ahead_mask, enc_input, attn_mask):
+        output = self.layer1(dec_input, dec_input, dec_input, look_ahead_mask)
+        output = self.layer2(output, enc_input, enc_input, attn_mask)
+        output = self.pos_fn(output)
+        return output
+
+class FFNN(nn.Module):
+    def __init__(self, args):
+        super(FFNN, self).__init__()
+
+        self.hidden_dim = args.hidden_dim
+        self.FFNN_dim = args.FFNN_dim
+
+        self.FFNN = nn.Sequential(
+            nn.Linear(self.hidden_dim, self.FFNN_dim),
+            nn.ReLU(),
+            nn.Linear(self.FFNN_dim, self.hidden_dim)
+        )
+
+        self.layernorm = nn.LayerNorm(self.hidden_dim)
+        self.dropout = nn.Dropout(0.1)
+
+    def forward(self, attention):
+        ### FFNN ###
+        output = self.FFNN(attention)
+        output = self.dropout(output)
+        output = output + attention
+        output = self.layernorm(output)
+        return output
+
+class MultiheadAttention(nn.Module):
+    def __init__(self, args):
+        super(MultiheadAttention, self).__init__()
 
         # embedding_dim, d_model, 512 in paper
         self.hidden_dim = args.hidden_dim
@@ -38,7 +111,7 @@ class my_enc(nn.Module):
         self.head_dim = self.hidden_dim // self.num_head
         self.FFNN_dim = args.FFNN_dim
         self.bs = args.batch_size
-        
+
         self.device = torch.device('cuda') if args.cuda else torch.device('cpu')
 
         self.fcQ = nn.Linear(self.hidden_dim, self.head_dim * self.num_head)
@@ -46,26 +119,22 @@ class my_enc(nn.Module):
         self.fcV = nn.Linear(self.hidden_dim, self.head_dim * self.num_head)
         self.fcOut = nn.Linear(self.num_head * self.head_dim, self.hidden_dim)
 
-        self.FFNN = nn.Sequential(
-            nn.Linear(self.hidden_dim, self.FFNN_dim),
-            nn.ReLU(),
-            nn.Linear(self.FFNN_dim, self.hidden_dim)
-        )
-
+        self.layernorm = nn.LayerNorm(self.hidden_dim)
         self.dropout = nn.Dropout(0.1)
 
     def forward(self, srcQ, srcK, srcV, attn_mask):
 
+        ### FIRST ATTENTION ###
         Q = self.fcQ(srcQ) #(self.bs, seq_len, self.num_head * self.head_dim)
         K = self.fcK(srcK) #(self.bs, seq_len, self.num_head * self.head_dim)
         V = self.fcV(srcV) #(self.bs, seq_len, self.num_head * self.head_dim)
-        
+
         Q = Q.view(self.bs, -1, self.num_head, self.head_dim).transpose(1,2)
         K = K.view(self.bs, -1, self.num_head, self.head_dim).transpose(1,2)
         V = V.view(self.bs, -1, self.num_head, self.head_dim).transpose(1,2)
-        
+
         attn_mask = attn_mask.unsqueeze(1).repeat(1, self.num_head, 1, 1)
-        
+
         scale = 1 / (self.head_dim ** 0.5)
         scores = torch.matmul(Q, K.transpose(-1, -2)).mul_(scale)
         scores.masked_fill_(attn_mask, -1e9)
@@ -73,8 +142,9 @@ class my_enc(nn.Module):
         context = torch.matmul(attn_prob, V) #(self.bs, self.num_head, -1, self.head_dim)
         context = context.transpose(1, 2).contiguous().view(self.bs, -1, self.num_head * self.head_dim)
 
-        output = self.fcOut(context) # (self.bs, n_seq, d_hidn)
-        output_ = self.FFNN(output)
-        output_ = output_ + output
+        attention = self.fcOut(context) # (self.bs, n_seq, d_hidn)
+        attention = self.dropout(attention)
+        attention = attention + srcQ
+        attention = self.layernorm(attention)
 
-        return output_
+        return attention
