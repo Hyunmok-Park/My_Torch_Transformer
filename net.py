@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils import *
+
 
 class my_word_emb(nn.Module):
     def __init__(self, len_vocab, hidden_dim):
@@ -59,7 +61,7 @@ class DECODER(nn.Module):
     def forward(self, dec_input, look_ahead_mask, enc_input, attn_mask):
         for dec in self.layers:
             output = dec(dec_input, look_ahead_mask, enc_input, attn_mask)
-            srcQ, srcK, srcV = output, output, output
+            dec_input = output
         return output
 
 class my_dec_layer(nn.Module):
@@ -148,3 +150,38 @@ class MultiheadAttention(nn.Module):
         attention = self.layernorm(attention)
 
         return attention
+
+
+class Transformer(nn.Module):
+    def __init__(self, conf):
+        super(Transformer, self).__init__()
+
+        self.encoder = ENCODER(conf)
+        self.decoder = DECODER(conf)
+
+        self.FFNN = nn.Linear(conf.hidden_dim, conf.n_output)
+        self.criterion = torch.nn.CrossEntropyLoss()
+
+
+    def forward(self, conf, enc_inputs, dec_inputs, target):
+
+        word_emb = my_word_emb(len_vocab=5000, hidden_dim=conf.hidden_dim)
+        pos_encoding = get_sinusoid_encoding_table(conf.n_seq, conf.hidden_dim)
+        pos_encoding = torch.FloatTensor(pos_encoding)
+        pos_emb = my_pos_emb(pos_encoding)
+
+        input_sum = make_sum_inputs(conf, word_emb, enc_inputs, pos_emb)
+        attn_mask = make_attn_mask(enc_inputs, input_sum)
+
+        dec_input_sum = make_sum_inputs(conf, word_emb, dec_inputs, pos_emb)
+        look_ahead_mask = get_attn_decoder_mask(dec_inputs)
+
+        enc_output = self.encoder(enc_inputs, attn_mask)
+        dec_output = self.decoder(dec_input_sum, look_ahead_mask, enc_output, attn_mask)
+
+        dec_output = self.FFNN(dec_output)
+        dec_output = torch.softmax(dec_output, dim=-1)
+
+        loss = self.criterion(dec_output, target)
+
+        return dec_output

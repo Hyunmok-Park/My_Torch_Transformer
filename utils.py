@@ -33,7 +33,7 @@ def make_sum_inputs(conf, word_emb, inputs, pos_emb):
     input_sum = inputs_embs + pos_embs
     return input_sum
 
-def make_attn_mask(inputs, input_sum):
+def make_attn_mask(inputs):
     attn_mask = inputs.eq(0).unsqueeze(1).expand(input_sum.size(0), input_sum.size(1), input_sum.size(1))
     return attn_mask
 
